@@ -6,6 +6,10 @@
  */
 
 #include <chrono>
+#include <ros/ros.h>
+#include <sensor_msgs/fill_image.h>
+#include <image_transport/image_transport.h>
+#include <time.h>
 
 #include "core/rpicam_app.hpp"
 #include "core/options.hpp"
@@ -16,15 +20,28 @@ using namespace std::placeholders;
 
 static void event_loop(RPiCamApp &app)
 {
-	Options const *options = app.GetOptions();
+	ros::NodeHandle nh;
+	image_transport::ImageTransport it(nh);
+	image_transport::Publisher pub = it.advertise("camera/image_raw", 10);
 
 	app.OpenCamera();
 	app.ConfigureViewfinder();
 	app.StartCamera();
 
-	auto start_time = std::chrono::high_resolution_clock::now();
+	struct timespec boot_ts, epoch_ts;
+	clock_gettime(CLOCK_BOOTTIME, &boot_ts);
+	clock_gettime(CLOCK_REALTIME, &epoch_ts);
+	uint64_t boot_epoch_offset = epoch_ts.tv_sec * 1000000000 + epoch_ts.tv_nsec - (boot_ts.tv_sec * 1000000000 + boot_ts.tv_nsec);
 
-	for (unsigned int count = 0; ; count++)
+	sensor_msgs::Image img;
+	img.height = 400;
+	img.width = 640;
+	img.step = 640;
+	img.encoding = sensor_msgs::image_encodings::MONO8;
+	img.is_bigendian = 0;
+	img.data.resize(640*400);
+
+	while (1)
 	{
 		RPiCamApp::Msg msg = app.Wait();
 		if (msg.type == RPiCamApp::MsgType::Timeout)
@@ -39,18 +56,27 @@ static void event_loop(RPiCamApp &app)
 		else if (msg.type != RPiCamApp::MsgType::RequestComplete)
 			throw std::runtime_error("unrecognised message!");
 
-		LOG(2, "Viewfinder frame " << count);
-		auto now = std::chrono::high_resolution_clock::now();
-		if (options->timeout && (now - start_time) > options->timeout.value)
-			return;
-
 		CompletedRequestPtr &completed_request = std::get<CompletedRequestPtr>(msg.payload);
-		app.ShowPreview(completed_request, app.ViewfinderStream());
+		
+		auto sensor_ts = completed_request->metadata.get(controls::SensorTimestamp);
+		uint64_t sensor_ts_epoch = *sensor_ts + boot_epoch_offset;
+		ros::Time sensor_ros_ts(sensor_ts_epoch / 1000000000, sensor_ts_epoch % 1000000000);
+		//clock_gettime(CLOCK_BOOTTIME, &boot_ts);
+		//printf("%lu %lu\n", (uint64_t)*sensor_ts, boot_ts.tv_sec*1000000000+boot_ts.tv_nsec);
+
+		libcamera::Span<uint8_t> buffer = app.Mmap(completed_request->buffers[app.ViewfinderStream()])[0];
+		img.header.stamp = sensor_ros_ts;
+		memcpy(&img.data[0], buffer.data(), 640*400);
+		pub.publish(img);
+		
+		//app.ShowPreview(completed_request, app.ViewfinderStream());
 	}
 }
 
 int main(int argc, char *argv[])
 {
+	ros::init(argc, argv, "libcamera_hello", ros::init_options::AnonymousName | ros::init_options::NoSigintHandler);
+	ros::start();
 	try
 	{
 		RPiCamApp app;
@@ -66,7 +92,9 @@ int main(int argc, char *argv[])
 	catch (std::exception const &e)
 	{
 		LOG_ERROR("ERROR: *** " << e.what() << " ***");
+		ros::shutdown();
 		return -1;
 	}
+	ros::shutdown();
 	return 0;
 }
