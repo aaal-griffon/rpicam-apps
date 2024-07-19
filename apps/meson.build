@@ -13,7 +13,7 @@ rpicam_vid = executable('rpicam-vid', files('rpicam_vid.cpp'),
 rpicam_hello = executable('rpicam-hello', files('rpicam_hello.cpp'),
                           include_directories : include_directories('..'),
                           dependencies: libcamera_dep,
-                          link_with : rpicam_app,
+                          link_with : [rpicam_app, roscpp, rostime, rosconsole, roscpp_serialization, image_transport],
                           install : true)
 
 rpicam_raw = executable('rpicam-raw', files('rpicam_raw.cpp'),
